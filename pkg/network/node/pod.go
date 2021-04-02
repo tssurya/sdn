@@ -212,41 +212,46 @@ func (m *podManager) waitRequest(request *cniserver.PodRequest) *cniserver.PodRe
 // Enqueue incoming pod requests from the CNI server, wait on the result,
 // and return that result to the CNI client
 func (m *podManager) handleCNIRequest(request *cniserver.PodRequest) ([]byte, error) {
-	klog.V(5).Infof("Dispatching pod network request %v", request)
+	klog.V(1).Infof("Dispatching pod network request %v", request)
 	m.addRequest(request)
 	result := m.waitRequest(request)
-	klog.V(5).Infof("Returning pod network request %v, result %s err %v", request, string(result.Response), result.Err)
+	klog.V(1).Infof("Returning pod network request %v, result %s err %v", request, string(result.Response), result.Err)
 	return result.Response, result.Err
 }
 
 func (m *podManager) updateLocalMulticastRulesWithLock(vnid uint32) {
+	klog.V(1).Infof("inside updateLocalMulticastRulesWithLock %v", vnid)
 	var ofports []int
 	enabled := m.policy.GetMulticastEnabled(vnid)
 	if enabled {
 		for _, pod := range m.runningPods {
 			if pod.vnid == vnid {
 				ofports = append(ofports, pod.ofport)
+				klog.V(1).Infof("inside enabled loop %v", pod)
 			}
 		}
 	}
 
 	if err := m.ovs.UpdateLocalMulticastFlows(vnid, enabled, ofports); err != nil {
+		klog.V(1).Infof("inside UpdateLocalMulticastFlows err %v", err)
 		utilruntime.HandleError(fmt.Errorf("Error updating OVS multicast flows for VNID %d: %v", vnid, err))
-
 	}
 }
 
 // Update multicast OVS rules for the given vnid
 func (m *podManager) UpdateLocalMulticastRules(vnid uint32) {
+	klog.V(1).Infof("inside UpdateLocalMulticastRules %v", vnid)
 	m.runningPodsLock.Lock()
 	defer m.runningPodsLock.Unlock()
 	m.updateLocalMulticastRulesWithLock(vnid)
+	klog.V(1).Infof("inside UpdateLocalMulticastRules done %v", vnid)
 }
 
 // Process all CNI requests from the request queue serially.  Our OVS interaction
 // and scripts currently cannot run in parallel, and doing so greatly complicates
 // setup/teardown logic
 func (m *podManager) processCNIRequests() {
+	klog.V(1).Infof("processCNIRequests")
 	for request := range m.requests {
 		result := m.processRequest(request)
 		request.Result <- result
@@ -255,6 +260,7 @@ func (m *podManager) processCNIRequests() {
 }
 
 func (m *podManager) processRequest(request *cniserver.PodRequest) *cniserver.PodResult {
+	klog.Infof("processRequest %v", request)
 	pk := getPodKey(request.PodNamespace, request.PodName)
 	result := &cniserver.PodResult{}
 	switch request.Command {
@@ -290,13 +296,18 @@ func (m *podManager) processRequest(request *cniserver.PodRequest) *cniserver.Po
 		result.Err = err
 	case cniserver.CNI_DEL:
 		m.runningPodsLock.Lock()
+		klog.Infof("cniDelete %v", m.runningPods)
 		if runningPod, exists := m.runningPods[pk]; exists {
+			klog.Infof("trigerring delete from cache")
 			delete(m.runningPods, pk)
+			klog.Infof("cniDelete done from cache %v", m.runningPods)
 			if m.ovs != nil {
 				m.updateLocalMulticastRulesWithLock(runningPod.vnid)
+				klog.V(1).Infof("updateLocalMulticastRulesWithLock %v", m.runningPods)
 			}
 		}
 		m.runningPodsLock.Unlock()
+		klog.Infof("going for teardown %v %v", request.PodName, request.SandboxID)
 		result.Err = m.podHandler.teardown(request)
 		if result.Err != nil {
 			klog.Warningf("CNI_DEL %s failed: %v", pk, result.Err)
@@ -412,9 +423,13 @@ func (m *podManager) ipamAdd(netnsPath string, id string) (*current.Result, net.
 
 // Run CNI IPAM release for the container
 func (m *podManager) ipamDel(id string) error {
+	klog.Infof("inside ipamDel %v", id)
 	args := createIPAMArgs("", cniserver.CNI_DEL, id)
+	klog.Infof("inside ipamDel %v %v", id, args)
 	err := invoke.ExecPluginWithoutResult(containerLocalCniPluginsBinDir+"/osdn-host-local", m.ipamConfig, args)
+	klog.Infof("inside ipamDel %v %v %v", err, m.ipamConfig, args)
 	if err != nil {
+		klog.Infof("inside ipamDel %v %v", id, err)
 		return fmt.Errorf("failed to run CNI IPAM DEL: %v", err)
 	}
 	return nil
@@ -469,19 +484,23 @@ func (m *podManager) setup(req *cniserver.PodRequest) (cnitypes.Result, *running
 	var success bool
 	defer func() {
 		if !success {
+			klog.Infof("calling from add %v %v %v", req.PodName, req.SandboxID, success)
 			m.ipamDel(req.SandboxID)
 		}
 	}()
 
 	v1Pod, err := m.kClient.CoreV1().Pods(req.PodNamespace).Get(context.TODO(), req.PodName, metav1.GetOptions{})
 	if err != nil {
+		klog.Infof("fetching pod failed%v %v %v %v", req.PodName, req.SandboxID, success, err)
 		return nil, nil, err
 	}
 
 	var ipamResult cnitypes.Result
 	podIP := net.ParseIP(req.AssignedIP)
+	klog.Infof("adding ipam %v %v", podIP, req.AssignedIP)
 	if podIP == nil {
 		ipamResult, podIP, err = m.ipamAdd(req.Netns, req.SandboxID)
+		klog.Infof("adding ipam %v %v %v %v", ipamResult, podIP, success, err)
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to run IPAM for %v: %v", req.SandboxID, err)
 		}
@@ -492,6 +511,7 @@ func (m *podManager) setup(req *cniserver.PodRequest) (cnitypes.Result, *running
 
 	vnid, err := m.policy.GetVNID(req.PodNamespace)
 	if err != nil {
+		klog.Infof("adding ipam vnid %v", vnid)
 		return nil, nil, err
 	}
 
@@ -500,8 +520,11 @@ func (m *podManager) setup(req *cniserver.PodRequest) (cnitypes.Result, *running
 		return nil, nil, err
 	}
 	if err := setupPodBandwidth(m.ovs, v1Pod, req.HostVeth, req.SandboxID); err != nil {
+		klog.Infof("oops %v", v1Pod)
 		return nil, nil, err
 	}
+
+	klog.Infof("boooo %v", ofport)
 
 	m.policy.EnsureVNIDRules(vnid)
 	success = true
@@ -512,6 +535,7 @@ func (m *podManager) setup(req *cniserver.PodRequest) (cnitypes.Result, *running
 // Update OVS flows when something (like the pod's namespace VNID) changes
 func (m *podManager) update(req *cniserver.PodRequest) (uint32, error) {
 	vnid, err := m.policy.GetVNID(req.PodNamespace)
+	klog.Infof("inside update %v", vnid)
 	if err != nil {
 		return 0, err
 	}
@@ -525,6 +549,7 @@ func (m *podManager) update(req *cniserver.PodRequest) (uint32, error) {
 
 // Clean up all pod networking (clear OVS flows, release IPAM lease, remove host/container veth)
 func (m *podManager) teardown(req *cniserver.PodRequest) error {
+	klog.Infof("going for teardown %v %v", req.PodName, req.SandboxID)
 	defer metrics.PodOperationsLatency.WithLabelValues(metrics.PodOperationTeardown).Observe(metrics.SinceInMicroseconds(time.Now()))
 
 	errList := []error{}
@@ -532,15 +557,19 @@ func (m *podManager) teardown(req *cniserver.PodRequest) error {
 	if err := m.ovs.TearDownPod(req.SandboxID); err != nil {
 		errList = append(errList, err)
 	}
+	klog.Infof("inside teardown %v", errList)
 
 	if err := m.ipamDel(req.SandboxID); err != nil {
 		errList = append(errList, err)
 	}
 
+	klog.Infof("inside teardown %v", errList)
+
 	if len(errList) > 0 {
+		klog.V(1).Infof("boom %v", errList)
 		return kerrors.NewAggregate(errList)
 	}
 
-	klog.Infof("CNI_DEL %s/%s", req.PodNamespace, req.PodName)
+	klog.Infof("CNI_DEL %s/%s %v", req.PodNamespace, req.PodName, req.SandboxID)
 	return nil
 }

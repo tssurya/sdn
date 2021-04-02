@@ -451,28 +451,34 @@ func (oc *ovsController) UpdatePod(sandboxID string, vnid uint32) error {
 }
 
 func (oc *ovsController) TearDownPod(sandboxID string) error {
+	klog.V(1).Infof("going for teardown %v %v", sandboxID)
 	_, podIP, err := oc.getPodDetailsBySandboxID(sandboxID)
 	if err != nil {
 		// OVS flows related to sandboxID not found
 		// Nothing needs to be done in that case
+		klog.Infof("OVS flows related to sandboxID not found. Nothing needs to be done in that case %v %v %v", sandboxID, podIP, err)
 		return nil
 	}
 
 	if err := oc.cleanupPodFlows(podIP); err != nil {
+		klog.Infof("cleanupPodFlows %v", podIP)
 		return err
 	}
 
 	ports, err := oc.getInterfacesForSandbox(sandboxID)
 	if err != nil {
+		klog.Infof("getInterfacesForSandbox %v %v %v", ports, sandboxID, err)
 		return err
 	}
 
 	if err := oc.ClearPodBandwidth(ports, sandboxID); err != nil {
+		klog.V(1).Infof("ClearPodBandwidth %v %v %v", ports, sandboxID, err)
 		return err
 	}
 
 	for _, port := range ports {
 		if err := oc.ovs.DeletePort(port); err != nil {
+			klog.Infof("DeletePort %v %v %v", port, sandboxID, err)
 			return err
 		}
 	}
